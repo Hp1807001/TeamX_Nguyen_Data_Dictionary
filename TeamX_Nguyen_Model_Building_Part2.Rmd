@@ -1,0 +1,27 @@
+---
+title: "DATA 422 — Model Building Part 2"
+author: "Nguyen Hiep"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(cluster)
+library(factoextra)
+library(forecast)
+library(caret)
+library(psych)
+library(nnet)
+library(MASS)
+options(warn=-1)
+```
+
+# 1. Project Question & Methods
+[... shortened for brevity in this example ...]
