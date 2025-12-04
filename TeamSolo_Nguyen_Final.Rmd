@@ -1,0 +1,491 @@
+---
+    title: "TeamSolo_Nguyen_Final"
+author: "Hiep Nguyen"
+output: html_document
+runtime: shiny
+---
+
+```{{r setup, include=FALSE}}
+# Load required packages
+library(shiny)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(DT)
+library(ggplot2)
+library(rvest)
+
+# -----------------------------
+# Load and prepare the dataset
+# -----------------------------
+# IMPORTANT:
+# Make sure "AIN Summary Page.html" is in the same "Final" folder as this Rmd.
+
+ain_path <- "AIN Summary Page.html"
+
+page <- read_html(ain_path)
+tables <- html_table(page, fill = TRUE)
+
+# Use the first (and only) table on the page
+df_wide <- tables[[1]]
+
+# Ensure first column is named "Categories"
+names(df_wide)[1] <- "Categories"
+
+# Clean numeric columns: remove asterisks, convert to numeric
+for (col in names(df_wide)[-1]) {
+df_wide[[col]] <- df_wide[[col]] %>%
+    as.character() %>%
+    str_replace_all("\\*", "") %>%
+    na_if("") %>%
+    as.numeric()
+}
+
+date_cols <- names(df_wide)[-1]
+
+# Long/tidy format: one row per category/date
+df_long <- df_wide %>%
+pivot_longer(
+    cols = -Categories,
+    names_to = "Date",
+    values_to = "Count"
+) %>%
+mutate(
+    Count = if_else(is.na(Count), 0, Count),
+    Date = factor(Date, levels = date_cols, ordered = TRUE),
+    Date_Index = as.integer(Date) - 1L
+)
+
+# Special summary categories (if they exist)
+special_cats <- intersect(
+c("All Aircraft Events", "Fatal Accidents"),
+unique(df_long$Categories)
+)
+
+all_categories <- sort(unique(df_long$Categories))
+default_category <- if (length(special_cats) > 0) special_cats[1] else all_categories[1]
+```
+
+```{r app, echo=TRUE}
+# -----------------------------------------------
+# Define the Shiny UI (with 4 tabs)
+# -----------------------------------------------
+
+ui <- navbarPage(
+    "FAA Preliminary Accident & Incident Summary – TeamSolo_Nguyen_Final",
+    
+    # 1. OVERVIEW TAB (must be first)
+    tabPanel(
+        "Overview",
+        sidebarLayout(
+            sidebarPanel(
+                h4("Controls (Overview)"),
+                selectInput(
+                    "overview_category",
+                    "Select category/manufacturer:",
+                    choices = all_categories,
+                    selected = default_category
+                )
+            ),
+            mainPanel(
+                h3("Project Overview"),
+                p(
+                    "This Shiny application is built using the FAA ASIAS Preliminary Accident and Incident ",
+                    "Reports AIN summary table. Each row in the data represents a category or manufacturer, ",
+                    "and each column (after 'Categories') represents a date with the number of notices entered."
+                ),
+                p(
+                    "The app provides an overview of the data, visualizations of event counts over time, ",
+                    "an interactive table of the summary data, and a simple trend model that relates ",
+                    "event counts to an ordered date index."
+                ),
+                hr(),
+                h4("Key Dataset Information"),
+                verbatimTextOutput("dataset_summary"),
+                hr(),
+                h4("Selected Category Snapshot Over Time"),
+                plotOutput("overview_plot", height = "350px")
+            )
+        )
+    ),
+    
+    # 2. VISUALIZATIONS TAB
+    tabPanel(
+        "Visualizations",
+        sidebarLayout(
+            sidebarPanel(
+                h4("Visualization Controls"),
+                selectInput(
+                    "category_focus",
+                    "Category/manufacturer for time trend:",
+                    choices = all_categories,
+                    selected = default_category
+                ),
+                radioButtons(
+                    "chart_type",
+                    "Time trend chart type:",
+                    choices = c("Line", "Bar"),
+                    selected = "Line"
+                ),
+                checkboxInput(
+                    "log_scale",
+                    "Use log scale for counts",
+                    value = FALSE
+                ),
+                sliderInput(
+                    "top_n",
+                    "Top N manufacturers (by total events):",
+                    min = 3,
+                    max = min(15, length(all_categories)),
+                    value = 5,
+                    step = 1
+                ),
+                checkboxGroupInput(
+                    "event_type_filter",
+                    "Include summary categories (if available):",
+                    choices = special_cats,
+                    selected = special_cats
+                )
+            ),
+            mainPanel(
+                h3("Graphs Describing Project Outcomes"),
+                fluidRow(
+                    column(
+                        width = 6,
+                        h4("1. Time Trend for Selected Category"),
+                        plotOutput("plot_category_trend", height = "320px")
+                    ),
+                    column(
+                        width = 6,
+                        h4("2. Fatal vs All Events Over Time"),
+                        plotOutput("plot_fatal_vs_all", height = "320px")
+                    )
+                ),
+                fluidRow(
+                    column(
+                        width = 6,
+                        h4("3. Top Manufacturers by Total Events"),
+                        plotOutput("plot_top_manufacturers", height = "320px")
+                    ),
+                    column(
+                        width = 6,
+                        h4("4. Total Events per Date (All Categories)"),
+                        plotOutput("plot_total_by_date", height = "320px")
+                    )
+                )
+            )
+        )
+    ),
+    
+    # 3. TABLES TAB (interactive data table)
+    tabPanel(
+        "Tables",
+        sidebarLayout(
+            sidebarPanel(
+                h4("Table Controls"),
+                textInput(
+                    "category_search",
+                    "Search categories (contains, case-insensitive):",
+                    value = ""
+                ),
+                sliderInput(
+                    "max_rows",
+                    "Maximum rows to show:",
+                    min = 10,
+                    max = 100,
+                    value = 30,
+                    step = 5
+                )
+            ),
+            mainPanel(
+                h3("Interactive Data Table"),
+                p(
+                    "This table is a snapshot of the summary data used in the project. ",
+                    "You can filter by category name and limit the number of rows displayed."
+                ),
+                DT::dataTableOutput("table_snapshot")
+            )
+        )
+    ),
+    
+    # 4. MODEL TAB
+    tabPanel(
+        "Model",
+        sidebarLayout(
+            sidebarPanel(
+                h4("Model Controls"),
+                selectInput(
+                    "model_category",
+                    "Category/manufacturer for model:",
+                    choices = all_categories,
+                    selected = default_category
+                )
+            ),
+            mainPanel(
+                h3("Simple Trend Model: Count ~ Date_Index"),
+                p(
+                    "This model fits a simple linear regression of daily event counts on an ordered date index ",
+                    "for the selected category. It is intended as a demonstration of modeling with the project data."
+                ),
+                hr(),
+                h4("Model Summary"),
+                verbatimTextOutput("model_summary"),
+                hr(),
+                h4("Model Fit Plot"),
+                plotOutput("model_plot", height = "350px")
+            )
+        )
+    )
+)
+
+# -----------------------------------------------
+# Define the Shiny server logic
+# -----------------------------------------------
+
+server <- function(input, output, session) {
+    
+    # --------- Reactive helpers ---------
+    
+    category_overview_df <- reactive({
+        df_long %>%
+            filter(Categories == input$overview_category) %>%
+            arrange(Date)
+    })
+    
+    category_focus_df <- reactive({
+        df_long %>%
+            filter(Categories == input$category_focus) %>%
+            arrange(Date)
+    })
+    
+    fatal_all_df <- reactive({
+        if (length(special_cats) == 0) {
+            return(df_long[0, ])
+        }
+        df_long %>%
+            filter(Categories %in% special_cats) %>%
+            arrange(Categories, Date)
+    })
+    
+    top_manufacturers_df <- reactive({
+        # Exclude special summary categories
+        df_long %>%
+            filter(!Categories %in% special_cats) %>%
+            group_by(Categories) %>%
+            summarise(Total_Count = sum(Count), .groups = "drop") %>%
+            arrange(desc(Total_Count)) %>%
+            slice_head(n = input$top_n)
+    })
+    
+    total_by_date_df <- reactive({
+        df_long %>%
+            group_by(Date) %>%
+            summarise(Total_Count = sum(Count), .groups = "drop")
+    })
+    
+    model_df <- reactive({
+        df_long %>%
+            filter(Categories == input$model_category, Date_Index >= 0L) %>%
+            arrange(Date_Index)
+    })
+    
+    # --------- Overview outputs ---------
+    
+    output$dataset_summary <- renderText({
+        n_cats <- n_distinct(df_long$Categories)
+        n_dates <- n_distinct(df_long$Date)
+        total_events <- sum(df_long$Count, na.rm = TRUE)
+        
+        paste(
+            "Number of categories/manufacturers:", n_cats, "\n",
+            "Number of dates (columns in AIN summary table):", n_dates, "\n",
+            "Total events across all categories and dates:", total_events
+        )
+    })
+    
+    output$overview_plot <- renderPlot({
+        df <- category_overview_df()
+        
+        if (nrow(df) == 0) {
+            plot.new()
+            text(0.5, 0.5, "No data for this category", cex = 1.2)
+            return(invisible(NULL))
+        }
+        
+        ggplot(df, aes(x = Date, y = Count, group = 1)) +
+            geom_line() +
+            geom_point() +
+            labs(
+                x = "Date entered",
+                y = "Event count",
+                title = paste("Events over time:", input$overview_category)
+            ) +
+            theme_minimal() +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    })
+    
+    # --------- Visualization outputs (4 graphics) ---------
+    
+    output$plot_category_trend <- renderPlot({
+        df <- category_focus_df()
+        
+        if (nrow(df) == 0) {
+            plot.new()
+            text(0.5, 0.5, "No data for this category", cex = 1.2)
+            return(invisible(NULL))
+        }
+        
+        p <- ggplot(df, aes(x = Date, y = Count, group = 1))
+        
+        if (input$chart_type == "Line") {
+            p <- p + geom_line() + geom_point()
+        } else {
+            p <- p + geom_col()
+        }
+        
+        if (isTRUE(input$log_scale)) {
+            p <- p + scale_y_log10()
+        }
+        
+        p +
+            labs(
+                x = "Date entered",
+                y = "Event count",
+                title = paste("Events over time:", input$category_focus)
+            ) +
+            theme_minimal() +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    })
+    
+    output$plot_fatal_vs_all <- renderPlot({
+        df <- fatal_all_df()
+        
+        if (nrow(df) == 0 || length(input$event_type_filter) == 0) {
+            plot.new()
+            text(0.5, 0.5, "No summary categories available/selected", cex = 1.1)
+            return(invisible(NULL))
+        }
+        
+        df <- df %>%
+            filter(Categories %in% input$event_type_filter)
+        
+        ggplot(df, aes(x = Date, y = Count, color = Categories, group = Categories)) +
+            geom_line() +
+            geom_point() +
+            labs(
+                x = "Date entered",
+                y = "Event count",
+                title = "Fatal vs All Events Over Time",
+                color = "Category"
+            ) +
+            theme_minimal() +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    })
+    
+    output$plot_top_manufacturers <- renderPlot({
+        df <- top_manufacturers_df()
+        
+        if (nrow(df) == 0) {
+            plot.new()
+            text(0.5, 0.5, "No manufacturer data available", cex = 1.1)
+            return(invisible(NULL))
+        }
+        
+        df <- df %>%
+            arrange(Total_Count)
+        
+        ggplot(df, aes(x = Total_Count, y = reorder(Categories, Total_Count))) +
+            geom_col() +
+            labs(
+                x = "Total events across all dates",
+                y = "Manufacturer",
+                title = paste("Top", input$top_n, "manufacturers by total events")
+            ) +
+            theme_minimal()
+    })
+    
+    output$plot_total_by_date <- renderPlot({
+        df <- total_by_date_df()
+        
+        ggplot(df, aes(x = Date, y = Total_Count)) +
+            geom_col() +
+            labs(
+                x = "Date entered",
+                y = "Total events (all categories)",
+                title = "Total events per date"
+            ) +
+            theme_minimal() +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    })
+    
+    # --------- Tables (interactive data table) ---------
+    
+    output$table_snapshot <- DT::renderDataTable({
+        df <- df_wide
+        
+        search <- str_trim(input$category_search)
+        if (search != "") {
+            df <- df %>%
+                filter(str_detect(Categories, regex(search, ignore_case = TRUE)))
+        }
+        
+        df <- head(df, input$max_rows)
+        
+        datatable(
+            df,
+            options = list(
+                pageLength = min(10, nrow(df)),
+                lengthChange = FALSE
+            )
+        )
+    })
+    
+    # --------- Model (Count ~ Date_Index) ---------
+    
+    output$model_summary <- renderPrint({
+        df <- model_df()
+        
+        if (nrow(df) < 2 || length(unique(df$Date_Index)) < 2) {
+            cat(
+                "Not enough data points to fit a model for this category.\n",
+                "Please choose a different manufacturer/category."
+            )
+            return(invisible(NULL))
+        }
+        
+        mod <- lm(Count ~ Date_Index, data = df)
+        summary(mod)
+    })
+    
+    output$model_plot <- renderPlot({
+        df <- model_df()
+        
+        if (nrow(df) < 2 || length(unique(df$Date_Index)) < 2) {
+            plot.new()
+            text(0.5, 0.5, "Not enough data to fit model", cex = 1.2)
+            return(invisible(NULL))
+        }
+        
+        mod <- lm(Count ~ Date_Index, data = df)
+        df$Pred <- predict(mod)
+        
+        ggplot(df, aes(x = Date_Index, y = Count)) +
+            geom_point() +
+            geom_line(aes(y = Pred), linewidth = 1) +
+            scale_x_continuous(
+                breaks = unique(df$Date_Index),
+                labels = as.character(df$Date)
+            ) +
+            labs(
+                x = "Date (ordered index)",
+                y = "Event count",
+                title = paste("Trend model fit:", input$model_category)
+            ) +
+            theme_minimal() +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    })
+}
+
+# Launch the app inside the RMarkdown document
+shinyApp(ui, server)
+```
